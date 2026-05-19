@@ -1,0 +1,78 @@
+name: Run Investment Data Health Monitor
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 6 * * 1'   # every Monday 6AM UTC — simulates weekly data health check
+
+jobs:
+  run-notebook:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nbconvert jupyter ipykernel
+
+      - name: Run notebook
+        run: |
+          jupyter nbconvert \
+            --to notebook \
+            --execute \
+            --ExecutePreprocessor.timeout=120 \
+            --output InvestmentDataHealthMonitor_executed.ipynb \
+            InvestmentDataHealthMonitor.ipynb
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Convert executed notebook to HTML report
+        run: |
+          jupyter nbconvert \
+            --to html \
+            --no-input \
+            InvestmentDataHealthMonitor_executed.ipynb \
+            --output reports/data_health_report.html
+        continue-on-error: true
+
+      - name: Upload executed notebook as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-health-report-${{ github.run_number }}
+          path: |
+            InvestmentDataHealthMonitor_executed.ipynb
+            reports/
+          retention-days: 30
+
+      - name: Print summary
+        run: |
+          echo "## ✅ Data Health Monitor Run Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Detail |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📥 Download the executed notebook from the **Artifacts** section above." >> $GITHUB_STEP_SUMMARY

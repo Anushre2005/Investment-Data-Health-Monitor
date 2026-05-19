@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Investment Data Health Monitor</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'DM Sans', system-ui, sans-serif; background: #f8fafc; min-height: 100vh; }
+  button { font-family: 'DM Sans', system-ui, sans-serif; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback } = React;
+const { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
+
+const DOMAINS = ["Securities", "Positions", "Trades", "Share Prices", "Client Data"];
+const DOMAIN_ICONS = { Securities:"🏦", Positions:"📊", Trades:"🔄", "Share Prices":"📈", "Client Data":"👤" };
+
+const DATA_DICTIONARY = [
+  { domain:"Securities", field:"isin", type:"VARCHAR(12)", owner:"Ref Data Team", refresh:"Daily 7AM", description:"International Securities Identification Number" },
+  { domain:"Securities", field:"security_name", type:"VARCHAR(255)", owner:"Ref Data Team", refresh:"Daily 7AM", description:"Full legal name of the security" },
+  { domain:"Securities", field:"asset_class", type:"ENUM", owner:"Ref Data Team", refresh:"Daily 7AM", description:"Equity / Fixed Income / Derivative / FX" },
+  { domain:"Positions", field:"portfolio_id", type:"VARCHAR(20)", owner:"Portfolio Ops", refresh:"T+1 EOD", description:"Unique identifier for client portfolio" },
+  { domain:"Positions", field:"market_value", type:"DECIMAL(18,4)", owner:"Portfolio Ops", refresh:"T+1 EOD", description:"MTM value in base currency (USD)" },
+  { domain:"Positions", field:"quantity", type:"DECIMAL(18,6)", owner:"Portfolio Ops", refresh:"T+1 EOD", description:"Number of units held" },
+  { domain:"Trades", field:"trade_id", type:"VARCHAR(36)", owner:"Trade Ops", refresh:"Real-time", description:"UUID for each trade execution" },
+  { domain:"Trades", field:"settlement_date", type:"DATE", owner:"Trade Ops", refresh:"Real-time", description:"Expected settlement date (T+2 for equities)" },
+  { domain:"Share Prices", field:"close_price", type:"DECIMAL(12,4)", owner:"Market Data", refresh:"EOD 6PM", description:"Official closing price from primary exchange" },
+  { domain:"Share Prices", field:"price_source", type:"VARCHAR(50)", owner:"Market Data", refresh:"EOD 6PM", description:"Data vendor (Bloomberg, Refinitiv, ICE)" },
+  { domain:"Client Data", field:"client_id", type:"VARCHAR(20)", owner:"Client Services", refresh:"On change", description:"Unique client identifier in CRM" },
+  { domain:"Client Data", field:"kyc_status", type:"ENUM", owner:"Compliance", refresh:"On change", description:"KYC verification status: Verified / Pending / Expired" },
+];
+
+const RAG = {
+  green: { bg:"#16a34a", light:"#dcfce7", text:"#166534", label:"Healthy" },
+  amber: { bg:"#d97706", light:"#fef3c7", text:"#92400e", label:"At Risk" },
+  red:   { bg:"#dc2626", light:"#fee2e2", text:"#991b1b", label:"Critical" },
+};
+
+function generateDomainMetrics(seed) {
+  const rng = (min, max, offset) => {
+    const val = Math.sin(seed * 9301 + offset * 49297 + 233) * 0.5 + 0.5;
+    return +(min + val * (max - min)).toFixed(1);
+  };
+  return DOMAINS.map((domain, i) => {
+    const completeness = rng(72, 99.8, i);
+    const timeliness = rng(68, 99.5, i + 10);
+    const validity = rng(75, 99.9, i + 20);
+    const recon_breaks = Math.round(rng(0, 18, i + 30));
+    const exception_backlog = Math.round(rng(0, 25, i + 40));
+    const rag = v => v >= 95 ? "green" : v >= 80 ? "amber" : "red";
+    const statuses = [rag(completeness), rag(timeliness), rag(validity)];
+    return {
+      domain, completeness, timeliness, validity, recon_breaks, exception_backlog,
+      sla_breach: timeliness < 90,
+      status: statuses.includes("red") ? "red" : statuses.includes("amber") ? "amber" : "green",
+    };
+  });
+}
+
+function generatePriceSeries(seed) {
+  const base = 142 + Math.sin(seed) * 10;
+  return Array.from({ length: 30 }, (_, i) => {
+    const normal = base + Math.sin(i * 0.4 + seed) * 8 + Math.sin(i * 2.1 + seed * 3) * 2;
+    const price = (i === 8 || i === 22) ? normal * (i === 8 ? 1.18 : 0.82) : normal;
+    return { day: `D${i+1}`, price: +price.toFixed(2), isAnomaly: i === 8 || i === 22 };
+  });
+}
+
+function generateAnomalies(seed) {
+  const prices = generatePriceSeries(seed);
+  const vals = prices.map(p => p.price).sort((a,b) => a-b);
+  const q1 = vals[Math.floor(vals.length * 0.25)];
+  const q3 = vals[Math.floor(vals.length * 0.75)];
+  const iqr = q3 - q1;
+  const lower = +(q1 - 1.5 * iqr).toFixed(2);
+  const upper = +(q3 + 1.5 * iqr).toFixed(2);
+  return prices.map((p,i) => ({...p, idx:i, lower, upper})).filter(p => p.price < lower || p.price > upper);
+}
+
+function generateExceptions(metrics, seed) {
+  const exceptions = [];
+  metrics.forEach(m => {
+    if (m.completeness < 95) exceptions.push({ domain:m.domain, type:"Completeness", severity: m.completeness < 80 ? "Critical":"Warning", value: m.completeness+"%", msg:`${m.domain} completeness at ${m.completeness}% — below ${m.completeness < 80 ? "critical (80%)":"warning (95%)"} threshold.` });
+    if (m.sla_breach) exceptions.push({ domain:m.domain, type:"SLA Breach", severity:"Critical", value: m.timeliness+"%", msg:`${m.domain} timeliness SLA breached. Current: ${m.timeliness}%, required: ≥90%.` });
+    if (m.recon_breaks > 10) exceptions.push({ domain:m.domain, type:"Recon Breaks", severity: m.recon_breaks > 15 ? "Critical":"Warning", value: m.recon_breaks+" breaks", msg:`${m.recon_breaks} unresolved reconciliation breaks in ${m.domain}.` });
+  });
+  generateAnomalies(seed).forEach(a => {
+    exceptions.push({ domain:"Share Prices", type:"Anomaly", severity:"Warning", value:`$${a.price}`, msg:`Price outlier on Day ${a.idx+1}: $${a.price} (IQR bounds [$${a.lower}–$${a.upper}]).` });
+  });
+  return exceptions;
+}
+
+function RagBadge({ status, large }) {
+  const c = RAG[status];
+  return <span style={{ background:c.light, color:c.text, borderRadius:99, padding: large?"4px 14px":"2px 10px", fontSize: large?13:11, fontWeight:600, display:"inline-block" }}>{c.label}</span>;
+}
+
+function MetricBar({ value }) {
+  const color = value >= 95 ? "#16a34a" : value >= 80 ? "#d97706" : "#dc2626";
+  return (
+    <div style={{ height:6, background:"#e5e7eb", borderRadius:99, overflow:"hidden", marginTop:6 }}>
+      <div style={{ width:`${value}%`, height:"100%", background:color, borderRadius:99 }} />
+    </div>
+  );
+}
+
+function KPICard({ domain, completeness, timeliness, validity, recon_breaks, sla_breach, status, onClick, selected }) {
+  const c = RAG[status];
+  return (
+    <div onClick={onClick} style={{ background:"#fff", border: selected?`2px solid ${c.bg}`:"1px solid #e5e7eb", borderRadius:12, padding:"16px 18px", cursor:"pointer", boxShadow: selected?`0 0 0 3px ${c.light}`:"none" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
+        <div>
+          <div style={{ fontSize:18, marginBottom:2 }}>{DOMAIN_ICONS[domain]}</div>
+          <div style={{ fontWeight:600, fontSize:13, color:"#111" }}>{domain}</div>
+        </div>
+        <RagBadge status={status} />
+      </div>
+      <div style={{ fontSize:11, color:"#6b7280", marginBottom:2 }}>Completeness</div>
+      <span style={{ fontSize:13, fontWeight:600, fontFamily:"monospace", color: completeness>=95?"#16a34a":completeness>=80?"#d97706":"#dc2626" }}>{completeness}%</span>
+      <MetricBar value={completeness} />
+      <div style={{ display:"flex", gap:10, marginTop:10, fontSize:11, color:"#6b7280", flexWrap:"wrap" }}>
+        <span>⏱ {timeliness}%</span>
+        <span>✅ {validity}%</span>
+        <span style={{ color: recon_breaks>10?"#dc2626":"#6b7280" }}>🔁 {recon_breaks} breaks</span>
+        {sla_breach && <span style={{ color:"#dc2626", fontWeight:600 }}>⚠ SLA</span>}
+      </div>
+    </div>
+  );
+}
+
+const TABS = ["Dashboard","Anomaly Detection","Exception Log","Data Dictionary"];
+
+function App() {
+  const [tab, setTab] = useState("Dashboard");
+  const [seed, setSeed] = useState(42);
+  const [selected, setSelected] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [dictFilter, setDictFilter] = useState("All");
+  const [lastRefresh, setLastRefresh] = useState(new Date());
+
+  const metrics = generateDomainMetrics(seed);
+  const priceSeries = generatePriceSeries(seed);
+  const anomalies = generateAnomalies(seed);
+  const exceptions = generateExceptions(metrics, seed);
+  const criticalCount = exceptions.filter(e => e.severity === "Critical").length;
+  const overallGreen = metrics.filter(m => m.status === "green").length;
+  const overallAmber = metrics.filter(m => m.status === "amber").length;
+  const overallRed = metrics.filter(m => m.status === "red").length;
+
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => { setSeed(s => s+1); setLastRefresh(new Date()); setRefreshing(false); }, 900);
+  }, []);
+
+  const selectedMetric = selected !== null ? metrics[selected] : null;
+  const filteredDict = dictFilter === "All" ? DATA_DICTIONARY : DATA_DICTIONARY.filter(d => d.domain === dictFilter);
+
+  const customDot = (props) => {
+    const { cx, cy, payload } = props;
+    return payload.isAnomaly
+      ? <circle key={`dot-${cx}`} cx={cx} cy={cy} r={6} fill="#dc2626" stroke="#fff" strokeWidth={2} />
+      : <circle key={`dot-${cx}`} cx={cx} cy={cy} r={2.5} fill="#3b82f6" />;
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#f8fafc" }}>
+
+      {/* Header */}
+      <div style={{ background:"#0f172a", color:"#fff", padding:"16px 24px", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10 }}>
+        <div>
+          <div style={{ fontSize:16, fontWeight:700 }}>📡 Investment Data Health Monitor</div>
+          <div style={{ fontSize:11, color:"#94a3b8", marginTop:2, fontFamily:"monospace" }}>Last refreshed: {lastRefresh.toLocaleTimeString()}</div>
+        </div>
+        <button onClick={handleRefresh} disabled={refreshing} style={{ background:"#1e293b", border:"1px solid #334155", color:"#e2e8f0", borderRadius:8, padding:"7px 16px", fontSize:12 }}>
+          {refreshing ? "⏳ Refreshing..." : "↻ Simulate Refresh"}
+        </button>
+      </div>
+
+      {/* Summary Bar */}
+      <div style={{ background:"#fff", borderBottom:"1px solid #e5e7eb", padding:"10px 24px", display:"flex", gap:20, alignItems:"center", flexWrap:"wrap" }}>
+        {[["#16a34a", overallGreen, "Healthy"],["#d97706", overallAmber, "At Risk"],["#dc2626", overallRed, "Critical"]].map(([color, count, label]) => (
+          <div key={label} style={{ display:"flex", gap:6, alignItems:"center" }}>
+            <span style={{ width:10, height:10, borderRadius:"50%", background:color, display:"inline-block" }} />
+            <span style={{ fontSize:12, color:"#374151" }}>{count} {label}</span>
+          </div>
+        ))}
+        <div style={{ marginLeft:"auto", fontSize:12, color: criticalCount>0?"#dc2626":"#6b7280", fontWeight: criticalCount>0?600:400 }}>
+          {criticalCount > 0 ? `⚠ ${criticalCount} critical exceptions` : `✓ ${exceptions.length} exceptions total`}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ background:"#fff", borderBottom:"1px solid #e5e7eb", padding:"0 24px", display:"flex", overflowX:"auto" }}>
+        {TABS.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{ background:"none", border:"none", borderBottom: tab===t?"2px solid #0f172a":"2px solid transparent", padding:"11px 16px", fontSize:13, fontWeight: tab===t?600:400, color: tab===t?"#0f172a":"#6b7280", whiteSpace:"nowrap" }}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding:"20px 24px" }}>
+
+        {/* DASHBOARD */}
+        {tab === "Dashboard" && <>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(170px, 1fr))", gap:12, marginBottom:20 }}>
+            {metrics.map((m,i) => (
+              <KPICard key={m.domain} {...m} selected={selected===i} onClick={() => setSelected(selected===i?null:i)} />
+            ))}
+          </div>
+
+          {selectedMetric && (
+            <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"18px 20px", marginBottom:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:8 }}>
+                <div style={{ fontWeight:700, fontSize:15 }}>{DOMAIN_ICONS[selectedMetric.domain]} {selectedMetric.domain} — Drill Down</div>
+                <RagBadge status={selectedMetric.status} large />
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:10 }}>
+                {[
+                  { label:"Completeness", value:selectedMetric.completeness+"%", rag: selectedMetric.completeness>=95?"green":selectedMetric.completeness>=80?"amber":"red" },
+                  { label:"Timeliness",   value:selectedMetric.timeliness+"%",   rag: selectedMetric.timeliness>=95?"green":selectedMetric.timeliness>=80?"amber":"red" },
+                  { label:"Validity",     value:selectedMetric.validity+"%",     rag: selectedMetric.validity>=95?"green":selectedMetric.validity>=80?"amber":"red" },
+                  { label:"Recon Breaks", value:selectedMetric.recon_breaks,     rag: selectedMetric.recon_breaks===0?"green":selectedMetric.recon_breaks<=10?"amber":"red" },
+                  { label:"Exception Backlog", value:selectedMetric.exception_backlog, rag: selectedMetric.exception_backlog===0?"green":selectedMetric.exception_backlog<=10?"amber":"red" },
+                  { label:"SLA Status",   value:selectedMetric.sla_breach?"Breached":"On Track", rag: selectedMetric.sla_breach?"red":"green" },
+                ].map(kpi => (
+                  <div key={kpi.label} style={{ background:RAG[kpi.rag].light, borderRadius:8, padding:"10px 14px" }}>
+                    <div style={{ fontSize:11, color:RAG[kpi.rag].text, marginBottom:4 }}>{kpi.label}</div>
+                    <div style={{ fontSize:20, fontWeight:700, fontFamily:"monospace", color:RAG[kpi.rag].text }}>{kpi.value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"16px 18px" }}>
+            <div style={{ fontWeight:600, fontSize:13, marginBottom:14, color:"#111" }}>Completeness by Domain (%)</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <BarChart data={metrics} margin={{ top:0, right:10, left:-20, bottom:0 }}>
+                <XAxis dataKey="domain" tick={{ fontSize:10, fill:"#6b7280" }} />
+                <YAxis domain={[60,100]} tick={{ fontSize:10, fill:"#6b7280" }} />
+                <Tooltip contentStyle={{ fontSize:12, borderRadius:8 }} formatter={v => [v+"%","Completeness"]} />
+                <ReferenceLine y={95} stroke="#16a34a" strokeDasharray="4 2" label={{ value:"95%", fontSize:10, fill:"#16a34a" }} />
+                <ReferenceLine y={80} stroke="#d97706" strokeDasharray="4 2" label={{ value:"80%", fontSize:10, fill:"#d97706" }} />
+                <Bar dataKey="completeness" fill="#3b82f6" radius={[4,4,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </>}
+
+        {/* ANOMALY DETECTION */}
+        {tab === "Anomaly Detection" && <>
+          <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"18px 20px", marginBottom:16 }}>
+            <div style={{ fontWeight:700, fontSize:14, marginBottom:4 }}>Share Price Anomaly Detection — IQR Method</div>
+            <div style={{ fontSize:12, color:"#6b7280", marginBottom:16 }}>Outliers flagged where price falls outside Q1 − 1.5×IQR or Q3 + 1.5×IQR. Red dots = anomalous prices.</div>
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={priceSeries} margin={{ top:10, right:20, left:-10, bottom:0 }}>
+                <XAxis dataKey="day" tick={{ fontSize:10, fill:"#6b7280" }} interval={4} />
+                <YAxis tick={{ fontSize:10, fill:"#6b7280" }} domain={["auto","auto"]} />
+                <Tooltip contentStyle={{ fontSize:12, borderRadius:8 }} formatter={v => ["$"+v,"Price"]} />
+                <Line type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={2} dot={customDot} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ fontWeight:600, fontSize:13, marginBottom:10 }}>Flagged Anomalies ({anomalies.length})</div>
+          {anomalies.length === 0 && <div style={{ color:"#16a34a", fontSize:13 }}>✓ No anomalies detected.</div>}
+          {anomalies.map((a,i) => (
+            <div key={i} style={{ background:"#fee2e2", border:"1px solid #fca5a5", borderRadius:10, padding:"12px 16px", marginBottom:8 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", flexWrap:"wrap", gap:6 }}>
+                <div>
+                  <span style={{ fontWeight:600, fontSize:13, color:"#991b1b" }}>Day {a.idx+1} — Price Outlier Detected</span>
+                  <div style={{ fontSize:12, color:"#7f1d1d", marginTop:4, fontFamily:"monospace" }}>
+                    Observed: <b>${a.price}</b> · IQR Bounds: [${a.lower} – ${a.upper}]
+                  </div>
+                </div>
+                <span style={{ background:"#fca5a5", color:"#7f1d1d", borderRadius:99, padding:"2px 10px", fontSize:11, fontWeight:600, alignSelf:"flex-start" }}>ANOMALY</span>
+              </div>
+              <div style={{ fontSize:11, color:"#991b1b", marginTop:8, borderTop:"1px solid #fca5a5", paddingTop:8 }}>
+                🤖 Auto-summary: Price on Day {a.idx+1} is {a.price > a.upper ? "significantly above":"significantly below"} the expected range. Recommend checking vendor feed, corporate action events, or data pipeline integrity.
+              </div>
+            </div>
+          ))}
+
+          <div style={{ background:"#f0fdf4", border:"1px solid #86efac", borderRadius:10, padding:"12px 16px", marginTop:8 }}>
+            <div style={{ fontSize:12, color:"#166534", fontWeight:600, marginBottom:4 }}>Algorithm Details</div>
+            <div style={{ fontSize:11, color:"#166534", fontFamily:"monospace", lineHeight:1.8 }}>
+              Method: Interquartile Range (IQR) &nbsp;|&nbsp; Lower fence = Q1 − 1.5×IQR &nbsp;|&nbsp; Upper fence = Q3 + 1.5×IQR &nbsp;|&nbsp; Window: 30-day rolling
+            </div>
+          </div>
+        </>}
+
+        {/* EXCEPTION LOG */}
+        {tab === "Exception Log" && <>
+          <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>
+            <div style={{ background:"#fee2e2", borderRadius:8, padding:"10px 16px", flex:1, minWidth:90 }}>
+              <div style={{ fontSize:11, color:"#991b1b" }}>Critical</div>
+              <div style={{ fontSize:22, fontWeight:700, color:"#dc2626", fontFamily:"monospace" }}>{criticalCount}</div>
+            </div>
+            <div style={{ background:"#fef3c7", borderRadius:8, padding:"10px 16px", flex:1, minWidth:90 }}>
+              <div style={{ fontSize:11, color:"#92400e" }}>Warning</div>
+              <div style={{ fontSize:22, fontWeight:700, color:"#d97706", fontFamily:"monospace" }}>{exceptions.filter(e=>e.severity==="Warning").length}</div>
+            </div>
+            <div style={{ background:"#f0fdf4", borderRadius:8, padding:"10px 16px", flex:3, minWidth:180 }}>
+              <div style={{ fontSize:11, color:"#166534", marginBottom:4 }}>🤖 AI Exception Summary</div>
+              <div style={{ fontSize:11, color:"#166534", lineHeight:1.6 }}>
+                {criticalCount > 0
+                  ? `${criticalCount} critical issue${criticalCount>1?"s":""} require immediate attention. Prioritise SLA breach resolution and reconciliation breaks. ${exceptions.filter(e=>e.type==="Anomaly").length} price anomalies flagged for vendor validation.`
+                  : "No critical issues detected. Monitor amber-status domains for SLA compliance. Reconciliation breaks within acceptable range."}
+              </div>
+            </div>
+          </div>
+
+          {exceptions.length === 0 && <div style={{ color:"#16a34a", fontSize:13 }}>✓ No exceptions in current run.</div>}
+          {exceptions.map((ex,i) => (
+            <div key={i} style={{ background:"#fff", border:`1px solid ${ex.severity==="Critical"?"#fca5a5":"#fde68a"}`, borderLeft:`4px solid ${ex.severity==="Critical"?"#dc2626":"#d97706"}`, borderRadius:8, padding:"12px 16px", marginBottom:8, display:"flex", gap:12, alignItems:"flex-start" }}>
+              <div style={{ flex:1 }}>
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:4 }}>
+                  <span style={{ fontWeight:600, fontSize:12, color:"#111" }}>{ex.domain}</span>
+                  <span style={{ background:"#f1f5f9", borderRadius:99, padding:"1px 8px", fontSize:11, color:"#475569" }}>{ex.type}</span>
+                  <span style={{ background: ex.severity==="Critical"?"#fee2e2":"#fef3c7", color: ex.severity==="Critical"?"#991b1b":"#92400e", borderRadius:99, padding:"1px 8px", fontSize:11, fontWeight:600 }}>{ex.severity}</span>
+                </div>
+                <div style={{ fontSize:12, color:"#374151", lineHeight:1.5 }}>{ex.msg}</div>
+              </div>
+              <div style={{ fontFamily:"monospace", fontSize:13, fontWeight:600, color: ex.severity==="Critical"?"#dc2626":"#d97706", whiteSpace:"nowrap" }}>{ex.value}</div>
+            </div>
+          ))}
+        </>}
+
+        {/* DATA DICTIONARY */}
+        {tab === "Data Dictionary" && <>
+          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+            {["All",...DOMAINS].map(d => (
+              <button key={d} onClick={() => setDictFilter(d)} style={{ background: dictFilter===d?"#0f172a":"#fff", color: dictFilter===d?"#fff":"#374151", border:"1px solid #e5e7eb", borderRadius:99, padding:"5px 14px", fontSize:12 }}>
+                {d}
+              </button>
+            ))}
+          </div>
+          <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"auto" }}>
+            <table style={{ fontSize:12, minWidth:600 }}>
+              <thead>
+                <tr style={{ background:"#f8fafc" }}>
+                  {["Domain","Field","Type","Owner","Refresh","Description"].map(h => (
+                    <th key={h} style={{ padding:"10px 14px", textAlign:"left", fontWeight:600, color:"#374151", borderBottom:"1px solid #e5e7eb", fontSize:11, whiteSpace:"nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredDict.map((row,i) => (
+                  <tr key={i} style={{ borderBottom:"1px solid #f1f5f9", background: i%2===0?"#fff":"#fafafa" }}>
+                    <td style={{ padding:"9px 14px", fontWeight:500 }}>{DOMAIN_ICONS[row.domain]} {row.domain}</td>
+                    <td style={{ padding:"9px 14px", fontFamily:"monospace", color:"#1e40af", fontSize:11 }}>{row.field}</td>
+                    <td style={{ padding:"9px 14px", fontFamily:"monospace", color:"#6b7280", fontSize:11 }}>{row.type}</td>
+                    <td style={{ padding:"9px 14px", color:"#374151" }}>{row.owner}</td>
+                    <td style={{ padding:"9px 14px", color:"#6b7280" }}>{row.refresh}</td>
+                    <td style={{ padding:"9px 14px", color:"#374151" }}>{row.description}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>}
+
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
