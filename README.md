@@ -1,3 +1,4 @@
+![CI](https://github.com/Anushre2005/Investment-Data-Health-Monitor/actions/workflows/run_notebook.yml/badge.svg)
 # 📡 Investment Data Health Monitor
 
 A fully interactive, browser-based dashboard for monitoring the health of critical investment data — built with React, Recharts, and zero backend dependencies.
