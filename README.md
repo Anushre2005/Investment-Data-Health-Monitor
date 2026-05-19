@@ -1,5 +1,6 @@
 ![CI](https://github.com/Anushre2005/Investment-Data-Health-Monitor/actions/workflows/run_notebook.yml/badge.svg)
-# 📡 Investment Data Health Monitor
+
+#  Investment Data Health Monitor
 
 While exploring investment data management, I noticed most portfolios focus on ML models but skip the operational layer practitioners deal with daily — data quality monitoring, exception triage, and metadata governance. This dashboard fills that gap
 
