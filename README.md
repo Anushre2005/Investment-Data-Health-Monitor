@@ -3,8 +3,6 @@
 
 A fully interactive, browser-based dashboard for monitoring the health of critical investment data — built with React, Recharts, and zero backend dependencies.
 
-> Built as a portfolio project targeting investment data management roles (Mercer, BlackRock, etc.)
-
 ## 🚀 Live Demo
 [View Live →](https://anushre2005.github.io/Investment-Data-Health-Monitor/)
 
